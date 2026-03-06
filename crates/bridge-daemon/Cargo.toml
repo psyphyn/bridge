@@ -14,3 +14,6 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+hostname = { workspace = true }
