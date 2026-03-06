@@ -12,10 +12,12 @@
 mod dlp;
 mod flow;
 mod pipeline;
+pub mod tls;
 
 pub use dlp::{DlpScanner, DlpPattern, DlpMatch};
 pub use flow::{Flow, FlowMetadata, FlowDirection, FlowState};
 pub use pipeline::{InspectionPipeline, Inspector, InspectorResult};
+pub use tls::{BridgeCA, TlsInspectConfig, extract_sni};
 
 use serde::{Deserialize, Serialize};
 
