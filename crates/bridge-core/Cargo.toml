@@ -11,6 +11,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 ring = { workspace = true }
+rand = { workspace = true }
 boringtun = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

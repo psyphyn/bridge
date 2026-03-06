@@ -32,6 +32,7 @@ anyhow = "1"
 
 # Crypto
 ring = "0.17"
+rand = "0.8"
 
 # gRPC / protobuf
 tonic = "0.12"
