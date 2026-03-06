@@ -376,6 +376,131 @@ pub extern "C" fn bridge_generate_identity() -> BridgeIdentityKeypair {
     }
 }
 
+// ── Keystore-backed attestation ──────────────────────────────────────
+
+use std::sync::Mutex;
+use bridge_core::identity::{SoftwareKeyStore, KeyStore, KeyStoreAttestation, KeyStoreBackend};
+
+static KEYSTORE: OnceLock<Mutex<Option<Box<dyn KeyStore>>>> = OnceLock::new();
+static ATTESTATION: OnceLock<Mutex<Option<KeyStoreAttestation>>> = OnceLock::new();
+
+fn keystore_mutex() -> &'static Mutex<Option<Box<dyn KeyStore>>> {
+    KEYSTORE.get_or_init(|| Mutex::new(None))
+}
+
+fn attestation_mutex() -> &'static Mutex<Option<KeyStoreAttestation>> {
+    ATTESTATION.get_or_init(|| Mutex::new(None))
+}
+
+/// Attestation info returned to the caller.
+#[repr(C)]
+pub struct BridgeAttestationInfo {
+    /// "secure_enclave", "software", etc.
+    pub backend: *mut c_char,
+    /// Whether the key is hardware-backed (non-extractable).
+    pub hardware_backed: bool,
+    /// Device UUID string.
+    pub device_id: *mut c_char,
+    /// Base64-encoded public key.
+    pub public_key: *mut c_char,
+}
+
+/// Initialize the keystore with a software backend and generate a device identity.
+/// Returns attestation info. Caller must free strings with `bridge_free_string`.
+///
+/// Use this as the default. On macOS with Secure Enclave, call
+/// `bridge_init_keystore_se` instead (from Swift, after wiring SE callbacks).
+#[no_mangle]
+pub extern "C" fn bridge_init_keystore_software(
+    label: *const c_char,
+) -> BridgeAttestationInfo {
+    use base64::Engine;
+
+    let label = unsafe {
+        match cstr_to_string(label) {
+            Some(l) => l,
+            None => return null_attestation_info(),
+        }
+    };
+
+    let ks = Box::new(SoftwareKeyStore::new());
+    let platform = std::env::consts::OS.to_string();
+
+    let attestation = match KeyStoreAttestation::new(ks, &label, &platform) {
+        Ok(a) => a,
+        Err(_) => return null_attestation_info(),
+    };
+
+    let info = BridgeAttestationInfo {
+        backend: CString::new(attestation.backend().to_string()).unwrap().into_raw(),
+        hardware_backed: attestation.is_hardware_backed(),
+        device_id: CString::new(attestation.device_id().to_string()).unwrap().into_raw(),
+        public_key: CString::new(
+            base64::engine::general_purpose::STANDARD.encode(attestation.public_key()),
+        )
+        .unwrap()
+        .into_raw(),
+    };
+
+    *attestation_mutex().lock().unwrap() = Some(attestation);
+
+    info
+}
+
+/// Create an attestation token using the current keystore identity.
+/// Returns a compact token string (claims.signature). Caller must free with `bridge_free_string`.
+///
+/// `posture_score`: 0-100
+/// `access_tier`: 0=Quarantined, 1=Restricted, 2=Standard, 3=FullAccess
+/// `ttl_secs`: token validity in seconds
+#[no_mangle]
+pub extern "C" fn bridge_create_attestation_token(
+    posture_score: u8,
+    access_tier: u8,
+    ttl_secs: i64,
+) -> *mut c_char {
+    use bridge_core::posture::AccessTier;
+
+    let tier = match access_tier {
+        0 => AccessTier::Quarantined,
+        1 => AccessTier::Restricted,
+        2 => AccessTier::Standard,
+        3 => AccessTier::FullAccess,
+        _ => AccessTier::Standard,
+    };
+
+    let guard = attestation_mutex().lock().unwrap();
+    let attestation = match guard.as_ref() {
+        Some(a) => a,
+        None => return std::ptr::null_mut(),
+    };
+
+    match attestation.attest(posture_score, tier, ttl_secs) {
+        Ok(token) => CString::new(token.to_compact()).unwrap().into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Query the current keystore backend info.
+#[no_mangle]
+pub extern "C" fn bridge_keystore_is_hardware_backed() -> bool {
+    attestation_mutex()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|a| a.is_hardware_backed())
+        .unwrap_or(false)
+}
+
+fn null_attestation_info() -> BridgeAttestationInfo {
+    BridgeAttestationInfo {
+        backend: std::ptr::null_mut(),
+        hardware_backed: false,
+        device_id: std::ptr::null_mut(),
+        public_key: std::ptr::null_mut(),
+    }
+}
+
 // ── Memory management ────────────────────────────────────────────────
 
 /// Free a string previously returned by a `bridge_*` function.

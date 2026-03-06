@@ -19,4 +19,6 @@ pub struct Device {
     pub last_seen: DateTime<Utc>,
     pub posture_score: u8,
     pub access_tier: String,
+    /// Whether the device's last attestation token was cryptographically verified.
+    pub attestation_verified: bool,
 }

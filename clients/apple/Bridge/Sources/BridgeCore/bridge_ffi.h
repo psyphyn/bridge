@@ -92,6 +92,30 @@ BridgeResult bridge_send_packet(
 
 typedef void (*BridgePacketCallback)(void* context, const uint8_t* packet_data, size_t packet_len);
 
+// ── Keystore & Attestation ───────────────────────────────────────────
+
+typedef struct {
+    char* backend;          // "secure_enclave", "software", etc.
+    bool hardware_backed;   // true if key is in hardware (non-extractable)
+    char* device_id;        // UUID string
+    char* public_key;       // Base64-encoded public key
+} BridgeAttestationInfo;
+
+// Initialize software keystore (fallback). Free strings with bridge_free_string.
+BridgeAttestationInfo bridge_init_keystore_software(const char* label);
+
+// Create a signed attestation token. Returns compact string (claims.signature).
+// access_tier: 0=Quarantined, 1=Restricted, 2=Standard, 3=FullAccess
+// Free result with bridge_free_string.
+char* bridge_create_attestation_token(
+    uint8_t posture_score,
+    uint8_t access_tier,
+    int64_t ttl_secs
+);
+
+// Check if the current keystore is hardware-backed.
+bool bridge_keystore_is_hardware_backed(void);
+
 // ── Logging ──────────────────────────────────────────────────────────
 
 typedef void (*BridgeLogCallback)(void* context, uint8_t level, const char* message);

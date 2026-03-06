@@ -10,8 +10,10 @@
 //! - In production, keys are bound to TPM/Secure Enclave (platform-specific)
 
 mod attestation;
+pub mod keystore;
 
 pub use attestation::{AttestationToken, AttestationClaims, DeviceAttestation};
+pub use keystore::{KeyStore, KeyStoreBackend, KeyStoreAttestation, StoredKeyRef, SoftwareKeyStore, create_platform_keystore};
 
 use base64::Engine;
 use ring::rand::SystemRandom;
