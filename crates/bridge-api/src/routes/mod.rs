@@ -3,3 +3,4 @@
 pub mod devices;
 pub mod attest;
 pub mod policy;
+pub mod events;

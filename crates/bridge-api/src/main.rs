@@ -66,6 +66,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/policies/:name", get(routes::policy::get_policy).delete(routes::policy::delete_policy))
         .route("/api/v1/policies/rules", post(routes::policy::add_rule))
         .route("/api/v1/policies/evaluate", post(routes::policy::evaluate_policy))
+        // Security events (SIEM)
+        .route("/api/v1/events", get(routes::events::list_events).post(routes::events::ingest_events))
+        .route("/api/v1/events/stats", get(routes::events::event_stats))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 

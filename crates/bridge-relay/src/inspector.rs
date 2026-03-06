@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bridge_core::inspect::{DlpScanner, Flow, FlowState, InspectionPipeline, Verdict};
+use bridge_core::inspect::{
+    DlpScanner, Flow, FlowState, InspectionPipeline, Verdict,
+    BeaconInspector, ExfiltrationInspector,
+};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -72,10 +75,12 @@ pub struct RelayInspector {
 }
 
 impl RelayInspector {
-    /// Create a new relay inspector with default inspectors (DLP).
+    /// Create a new relay inspector with default inspectors (DLP + threat detection).
     pub fn new() -> Self {
         let mut pipeline = InspectionPipeline::new();
         pipeline.add_inspector(Box::new(DlpScanner::with_defaults()));
+        pipeline.add_inspector(Box::new(BeaconInspector::new()));
+        pipeline.add_inspector(Box::new(ExfiltrationInspector::new()));
 
         Self {
             pipeline,

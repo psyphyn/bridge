@@ -96,6 +96,83 @@ export async function deletePolicy(name: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error("Failed to delete policy");
 }
 
+// ── Security events (SIEM) ───────────────────────────────────────────
+
+export interface SecurityEvent {
+  id: string;
+  timestamp: string;
+  category: string;
+  severity: string;
+  outcome: string;
+  message: string;
+  device_id: string | null;
+  src_ip: string | null;
+  dst_ip: string | null;
+  domain: string | null;
+  application: string | null;
+  dst_port: number | null;
+  protocol: string | null;
+  bytes_out: number | null;
+  bytes_in: number | null;
+  detector: string;
+  metadata: Record<string, string>;
+}
+
+export interface EventListResponse {
+  events: SecurityEvent[];
+  total: number;
+}
+
+export interface EventStats {
+  total: number;
+  by_category: Record<string, number>;
+  by_severity: Record<string, number>;
+}
+
+export async function fetchEvents(params?: {
+  category?: string;
+  min_severity?: string;
+  limit?: number;
+}): Promise<EventListResponse> {
+  const query = new URLSearchParams();
+  if (params?.category) query.set("category", params.category);
+  if (params?.min_severity) query.set("min_severity", params.min_severity);
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  const res = await fetch(`${API_BASE}/api/v1/events${qs ? `?${qs}` : ""}`);
+  if (!res.ok) throw new Error("Failed to fetch events");
+  return res.json();
+}
+
+export async function fetchEventStats(): Promise<EventStats> {
+  const res = await fetch(`${API_BASE}/api/v1/events/stats`);
+  if (!res.ok) throw new Error("Failed to fetch event stats");
+  return res.json();
+}
+
+export function severityColor(severity: string): string {
+  switch (severity) {
+    case "Critical": return "text-red-400 bg-red-900/50 border-red-800";
+    case "High": return "text-orange-400 bg-orange-900/50 border-orange-800";
+    case "Medium": return "text-yellow-400 bg-yellow-900/50 border-yellow-800";
+    case "Low": return "text-blue-400 bg-blue-900/50 border-blue-800";
+    default: return "text-gray-400 bg-gray-900/50 border-gray-800";
+  }
+}
+
+export function categoryIcon(category: string): string {
+  switch (category) {
+    case "DataLoss": return "🔓";
+    case "CommandAndControl": return "🎯";
+    case "DnsThreat": return "🌐";
+    case "Exfiltration": return "📤";
+    case "PolicyViolation": return "⛔";
+    case "TunnelEvent": return "🔗";
+    case "PostureChange": return "🛡️";
+    default: return "📋";
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 export function actionLabel(action: Action): string {

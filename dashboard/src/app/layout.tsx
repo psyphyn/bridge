@@ -34,6 +34,7 @@ function Sidebar() {
         <NavItem href="/" label="Overview" />
         <NavItem href="/devices" label="Devices" />
         <NavItem href="/policies" label="Policies" />
+        <NavItem href="/events" label="Events" />
       </ul>
     </nav>
   );

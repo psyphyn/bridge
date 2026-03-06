@@ -21,6 +21,7 @@ prost = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+async-trait = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

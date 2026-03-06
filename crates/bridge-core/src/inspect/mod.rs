@@ -13,11 +13,15 @@ mod dlp;
 mod flow;
 mod pipeline;
 pub mod tls;
+pub mod beacon;
+pub mod exfiltration;
 
 pub use dlp::{DlpScanner, DlpPattern, DlpMatch};
 pub use flow::{Flow, FlowMetadata, FlowDirection, FlowState};
 pub use pipeline::{InspectionPipeline, Inspector, InspectorResult};
 pub use tls::{BridgeCA, TlsInspectConfig, extract_sni};
+pub use beacon::{BeaconDetector, BeaconInspector, BeaconConfig, BeaconScore};
+pub use exfiltration::{ExfiltrationDetector, ExfiltrationInspector, ExfilConfig};
 
 use serde::{Deserialize, Serialize};
 
