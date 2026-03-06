@@ -18,6 +18,7 @@ tower-http = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

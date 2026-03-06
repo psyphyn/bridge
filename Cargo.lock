@@ -245,6 +245,7 @@ dependencies = [
  "base64 0.22.1",
  "bridge-core",
  "chrono",
+ "rand",
  "reqwest",
  "serde",
  "serde_json",

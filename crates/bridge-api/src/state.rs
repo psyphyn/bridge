@@ -5,10 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::models::Device;
+use crate::routes::attest::AttestedDevice;
 
 /// The relay's WireGuard keypair and endpoint.
 #[derive(Debug, Clone)]
@@ -26,6 +28,10 @@ pub struct RelayConfig {
 pub struct AppState {
     pub devices: Arc<RwLock<HashMap<Uuid, Device>>>,
     pub relay: RelayConfig,
+    /// Pending attestation challenges (challenge_b64 -> expiry).
+    pub pending_challenges: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
+    /// Devices that have completed App Attest (key_id -> attestation record).
+    pub attested_devices: Arc<RwLock<HashMap<String, AttestedDevice>>>,
 }
 
 impl AppState {
@@ -33,6 +39,8 @@ impl AppState {
         Self {
             devices: Arc::new(RwLock::new(HashMap::new())),
             relay,
+            pending_challenges: Arc::new(RwLock::new(HashMap::new())),
+            attested_devices: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }

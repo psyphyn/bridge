@@ -59,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/devices/posture", post(routes::devices::report_posture))
         .route("/api/v1/devices/heartbeat", post(routes::devices::heartbeat))
         .route("/api/v1/devices", get(routes::devices::list_devices))
+        .route("/api/v1/attest/challenge", get(routes::attest::issue_challenge))
+        .route("/api/v1/attest/verify", post(routes::attest::verify_attestation))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 
