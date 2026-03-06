@@ -1,0 +1,45 @@
+# Bridge API server
+# Multi-stage build: compile Rust, then copy binary to minimal image
+
+FROM rust:1.83-bookworm AS builder
+
+WORKDIR /build
+
+# Copy workspace manifests for dependency caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/bridge-core/Cargo.toml crates/bridge-core/Cargo.toml
+COPY crates/bridge-api/Cargo.toml crates/bridge-api/Cargo.toml
+COPY crates/bridge-daemon/Cargo.toml crates/bridge-daemon/Cargo.toml
+COPY crates/bridge-relay/Cargo.toml crates/bridge-relay/Cargo.toml
+COPY crates/bridge-ffi/Cargo.toml crates/bridge-ffi/Cargo.toml
+
+# Create stub src files for dependency pre-build
+RUN mkdir -p crates/bridge-core/src && echo "pub const VERSION: &str = \"0.0.0\";" > crates/bridge-core/src/lib.rs && \
+    mkdir -p crates/bridge-api/src && echo "fn main() {}" > crates/bridge-api/src/main.rs && \
+    mkdir -p crates/bridge-daemon/src && echo "fn main() {}" > crates/bridge-daemon/src/main.rs && \
+    mkdir -p crates/bridge-relay/src && echo "fn main() {}" > crates/bridge-relay/src/main.rs && \
+    mkdir -p crates/bridge-ffi/src && echo "" > crates/bridge-ffi/src/lib.rs
+
+# Pre-build dependencies (cached unless Cargo.toml changes)
+RUN cargo build --release -p bridge-api 2>/dev/null || true
+
+# Copy actual source
+COPY crates/ crates/
+
+# Build the API server
+RUN cargo build --release -p bridge-api
+
+# Runtime image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/bridge-api /usr/local/bin/bridge-api
+
+ENV BRIDGE_API_LISTEN=0.0.0.0:8080
+ENV BRIDGE_RELAY_ENDPOINT=relay:51820
+
+EXPOSE 8080
+
+ENTRYPOINT ["bridge-api"]

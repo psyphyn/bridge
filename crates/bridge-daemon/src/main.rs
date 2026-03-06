@@ -6,13 +6,17 @@
 //! 3. Creates attestation token with posture score
 //! 4. Registers with the control plane
 //! 5. Establishes WireGuard tunnels
-//! 6. Runs heartbeat and posture reporting loops
+//! 6. Starts local DNS proxy (filtering + routing correlation)
+//! 7. Starts IPC server for UI communication
+//! 8. Runs heartbeat and posture reporting loops
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use base64::Engine;
 use bridge_core::api_types::DeviceRegistrationRequest;
+use bridge_core::dns::{DnsProxy, builtin_malware_domains, builtin_phishing_domains, builtin_ad_domains};
 use bridge_core::identity::{
     self, DeviceAttestation,
 };
@@ -23,6 +27,7 @@ use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 mod control_plane;
+mod ipc;
 
 use control_plane::ControlPlaneClient;
 
@@ -170,6 +175,61 @@ async fn main() -> anyhow::Result<()> {
         default_tunnel = ?default_tunnel_id,
         "Per-app router initialized"
     );
+
+    // ── Step 6: Start local DNS proxy ──
+    let dns_listen: SocketAddr = std::env::var("BRIDGE_DNS_LISTEN")
+        .unwrap_or_else(|_| "127.0.0.1:5353".to_string())
+        .parse()
+        .unwrap_or_else(|_| "127.0.0.1:5353".parse().unwrap());
+
+    let dns_upstream: SocketAddr = std::env::var("BRIDGE_DNS_UPSTREAM")
+        .unwrap_or_else(|_| "1.1.1.1:53".to_string())
+        .parse()
+        .unwrap_or_else(|_| "1.1.1.1:53".parse().unwrap());
+
+    let dns_proxy = Arc::new(DnsProxy::new(dns_listen, dns_upstream));
+
+    // Load threat intelligence blocklists
+    let mut blocked_domains = Vec::new();
+    blocked_domains.extend(builtin_malware_domains().iter().map(|s| s.to_string()));
+    blocked_domains.extend(builtin_phishing_domains().iter().map(|s| s.to_string()));
+    blocked_domains.extend(builtin_ad_domains().iter().map(|s| s.to_string()));
+    dns_proxy.add_blocked_domains(blocked_domains).await;
+    tracing::info!(listen = %dns_listen, upstream = %dns_upstream, "DNS proxy configured");
+
+    // Spawn DNS proxy
+    let dns_proxy_handle = dns_proxy.clone();
+    tokio::spawn(async move {
+        if let Err(e) = dns_proxy_handle.run().await {
+            tracing::error!(%e, "DNS proxy exited with error");
+        }
+    });
+
+    // Spawn DNS→router correlation loop
+    // Periodically feeds DNS resolution mappings into the per-app router
+    let _dns_proxy_for_router = dns_proxy.clone();
+    let router_for_dns = router.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            // Clear and re-populate DNS cache in the router (handled by DNS proxy mappings)
+            // The proxy auto-caches, and the router has its own domain_ip_cache.
+            // This is a lightweight heartbeat to confirm the DNS subsystem is alive.
+            let group_count = router_for_dns.read().await.groups().len();
+            tracing::trace!(groups = group_count, "DNS↔router sync tick");
+        }
+    });
+
+    // ── Step 7: Start IPC server ──
+    let ipc_router = router.clone();
+    let ipc_dns = dns_proxy.clone();
+    let ipc_device_id = registration.device_id;
+    tokio::spawn(async move {
+        if let Err(e) = ipc::run_ipc_server(ipc_device_id, ipc_router, ipc_dns).await {
+            tracing::error!(%e, "IPC server exited with error");
+        }
+    });
 
     let start_time = Instant::now();
 

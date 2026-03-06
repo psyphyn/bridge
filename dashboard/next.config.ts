@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Enable standalone output for Docker deployment
+  output: "standalone",
   // Proxy API requests to the Bridge control plane in development
   async rewrites() {
     return [
