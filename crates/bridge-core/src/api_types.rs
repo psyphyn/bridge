@@ -10,8 +10,12 @@ use uuid::Uuid;
 /// Request to register a new device with the control plane.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRegistrationRequest {
-    /// Base64-encoded device public key (x25519).
+    /// Base64-encoded device public key (x25519 for WireGuard).
     pub device_public_key: String,
+    /// Base64-encoded Ed25519 identity public key.
+    pub identity_public_key: Option<String>,
+    /// Signed attestation token proving device identity.
+    pub attestation_token: Option<String>,
     /// Platform identifier (macos, ios, android, windows, linux, chromeos).
     pub platform: String,
     /// OS version string.
@@ -86,6 +90,8 @@ pub struct HeartbeatRequest {
     pub device_id: Uuid,
     pub active_tunnels: u32,
     pub uptime_secs: u64,
+    /// Fresh attestation token (re-attested on each heartbeat).
+    pub attestation_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

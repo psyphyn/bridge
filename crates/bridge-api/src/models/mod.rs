@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub struct Device {
     pub id: Uuid,
     pub device_public_key: String,
+    /// Ed25519 identity public key (for attestation verification).
+    pub identity_public_key: Option<String>,
     pub platform: String,
     pub os_version: String,
     pub hardware_model: String,

@@ -148,6 +148,8 @@ async fn register_device_returns_tunnel_config() {
         .post(format!("{}/api/v1/devices/register", base))
         .json(&DeviceRegistrationRequest {
             device_public_key: "dGVzdGtleQ==".to_string(), // "testkey" in base64
+            identity_public_key: None,
+            attestation_token: None,
             platform: "macos".to_string(),
             os_version: "15.0".to_string(),
             hardware_model: "MacBookPro18,1".to_string(),
@@ -176,6 +178,8 @@ async fn posture_report_calculates_score() {
         .post(format!("{}/api/v1/devices/register", base))
         .json(&DeviceRegistrationRequest {
             device_public_key: "dGVzdGtleQ==".to_string(),
+            identity_public_key: None,
+            attestation_token: None,
             platform: "macos".to_string(),
             os_version: "15.0".to_string(),
             hardware_model: "MacBookPro18,1".to_string(),

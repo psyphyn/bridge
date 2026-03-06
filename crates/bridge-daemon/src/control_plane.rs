@@ -25,10 +25,6 @@ impl ControlPlaneClient {
         }
     }
 
-    pub fn device_id(&self) -> Option<Uuid> {
-        self.device_id
-    }
-
     /// Register this device with the control plane.
     pub async fn register(
         &mut self,
@@ -78,16 +74,14 @@ impl ControlPlaneClient {
         Ok(resp)
     }
 
-    /// Send a heartbeat.
-    pub async fn heartbeat(
+    /// Send a heartbeat with attestation token.
+    pub async fn heartbeat_with_attestation(
         &self,
+        device_id: Uuid,
         active_tunnels: u32,
         uptime_secs: u64,
+        attestation_token: Option<String>,
     ) -> anyhow::Result<HeartbeatResponse> {
-        let device_id = self
-            .device_id
-            .ok_or_else(|| anyhow::anyhow!("Not registered"))?;
-
         let url = format!("{}/api/v1/devices/heartbeat", self.base_url);
 
         let resp = self
@@ -97,6 +91,7 @@ impl ControlPlaneClient {
                 device_id,
                 active_tunnels,
                 uptime_secs,
+                attestation_token,
             })
             .send()
             .await?

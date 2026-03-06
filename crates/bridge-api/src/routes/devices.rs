@@ -25,9 +25,20 @@ pub async fn register_device(
     let device_id = Uuid::new_v4();
     let now = Utc::now();
 
+    // Log attestation if provided
+    if let Some(ref token) = req.attestation_token {
+        tracing::info!(
+            device_id = %device_id,
+            has_attestation = true,
+            token_len = token.len(),
+            "Device registration with attestation"
+        );
+    }
+
     let device = Device {
         id: device_id,
         device_public_key: req.device_public_key.clone(),
+        identity_public_key: req.identity_public_key.clone(),
         platform: req.platform.clone(),
         os_version: req.os_version,
         hardware_model: req.hardware_model,
@@ -41,6 +52,7 @@ pub async fn register_device(
     tracing::info!(
         device_id = %device_id,
         platform = %req.platform,
+        has_identity = req.identity_public_key.is_some(),
         "Device registered"
     );
 
