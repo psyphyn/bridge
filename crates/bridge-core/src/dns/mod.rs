@@ -72,6 +72,18 @@ impl DnsProxy {
             .map(|m| m.domain.clone())
     }
 
+    /// Get all current IP→domain mappings (for feeding into the router).
+    /// Only returns non-expired entries.
+    pub async fn current_mappings(&self) -> Vec<(IpAddr, String)> {
+        self.mappings
+            .read()
+            .await
+            .iter()
+            .filter(|(_, m)| m.resolved_at.elapsed() < m.ttl)
+            .map(|(ip, m)| (*ip, m.domain.clone()))
+            .collect()
+    }
+
     /// Run the DNS proxy. Listens for queries, filters, forwards, and caches.
     pub async fn run(&self) -> anyhow::Result<()> {
         let socket = Arc::new(UdpSocket::bind(self.listen_addr).await?);

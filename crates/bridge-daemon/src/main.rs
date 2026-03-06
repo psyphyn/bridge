@@ -28,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 
 mod control_plane;
 mod ipc;
+mod platform;
 
 use control_plane::ControlPlaneClient;
 
@@ -205,19 +206,29 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Configure system DNS to use our proxy (platform-specific)
+    let dns_addr_str = dns_listen.to_string();
+    if let Err(e) = platform::configure_dns(&dns_addr_str).await {
+        tracing::warn!(%e, "Could not configure system DNS (may need elevated privileges)");
+    }
+
     // Spawn DNS→router correlation loop
     // Periodically feeds DNS resolution mappings into the per-app router
-    let _dns_proxy_for_router = dns_proxy.clone();
+    let dns_proxy_for_router = dns_proxy.clone();
     let router_for_dns = router.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            // Clear and re-populate DNS cache in the router (handled by DNS proxy mappings)
-            // The proxy auto-caches, and the router has its own domain_ip_cache.
-            // This is a lightweight heartbeat to confirm the DNS subsystem is alive.
-            let group_count = router_for_dns.read().await.groups().len();
-            tracing::trace!(groups = group_count, "DNS↔router sync tick");
+            // Feed current DNS cache into the router for domain-based routing
+            let mappings = dns_proxy_for_router.current_mappings().await;
+            if !mappings.is_empty() {
+                let mut w = router_for_dns.write().await;
+                for (ip, domain) in &mappings {
+                    w.record_dns_resolution(domain, *ip);
+                }
+                tracing::debug!(count = mappings.len(), "Synced DNS mappings to router");
+            }
         }
     });
 
@@ -304,6 +315,11 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down");
+
+    // Restore system DNS to original settings
+    if let Err(e) = platform::restore_dns().await {
+        tracing::warn!(%e, "Could not restore system DNS");
+    }
 
     // Disconnect all tunnels
     for (id, _state) in tunnel_mgr.list_tunnels().await {
