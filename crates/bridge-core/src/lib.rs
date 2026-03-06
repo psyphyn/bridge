@@ -5,6 +5,7 @@ pub mod dns;
 pub mod policy;
 pub mod identity;
 pub mod api_types;
+pub mod camouflage;
 
 /// Bridge core version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
