@@ -1,0 +1,37 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Node (dashboard)
+node_modules/
+dashboard/.next/
+dashboard/out/
+
+# Build artifacts
+*.dylib
+*.so
+*.dll
+*.exe
+
+# Certificates (generated during development)
+*.pem
+*.key
+*.crt
+!proto/*.proto

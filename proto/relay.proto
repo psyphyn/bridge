@@ -1,0 +1,45 @@
+// Relay protocol - communication between relay and control plane.
+
+syntax = "proto3";
+package bridge.relay;
+
+// Inspection policy pushed from control plane to relay.
+// Note: contains NO user identity (split-knowledge).
+message InspectionPolicy {
+  string tunnel_id = 1;
+  bool tls_inspect = 2;
+  repeated string inspect_domains = 3;
+  repeated string bypass_domains = 4;
+  repeated DlpRule dlp_rules = 5;
+}
+
+message DlpRule {
+  string rule_id = 1;
+  string pattern_type = 2;
+  string pattern = 3;
+  string action = 4;
+}
+
+// Relay health report.
+message RelayHealth {
+  string relay_id = 1;
+  uint32 active_tunnels = 2;
+  uint64 bytes_processed = 3;
+  float cpu_usage = 4;
+  float memory_usage = 5;
+}
+
+message PolicySyncRequest {
+  string relay_id = 1;
+}
+
+message PolicySyncResponse {
+  repeated InspectionPolicy policies = 1;
+}
+
+service RelayControl {
+  rpc SyncPolicies(PolicySyncRequest) returns (PolicySyncResponse);
+  rpc ReportHealth(RelayHealth) returns (HealthAck);
+}
+
+message HealthAck {}

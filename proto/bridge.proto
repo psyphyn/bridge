@@ -1,0 +1,41 @@
+// Bridge IPC protocol - communication between daemon and UI shell.
+
+syntax = "proto3";
+package bridge;
+
+// Connection state reported by the daemon to the UI.
+enum ConnectionState {
+  DISCONNECTED = 0;
+  CONNECTING = 1;
+  CONNECTED = 2;
+  RECONNECTING = 3;
+  DISCONNECTING = 4;
+}
+
+// Status of the Bridge daemon.
+message DaemonStatus {
+  ConnectionState state = 1;
+  string version = 2;
+  uint32 active_tunnels = 3;
+  uint32 posture_score = 4;
+  string access_tier = 5;
+}
+
+// Request to connect or disconnect.
+message ConnectRequest {
+  bool connect = 1;
+}
+
+message ConnectResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Daemon service exposed via gRPC to the UI shell.
+service BridgeDaemon {
+  rpc GetStatus(StatusRequest) returns (DaemonStatus);
+  rpc Connect(ConnectRequest) returns (ConnectResponse);
+  rpc StreamStatus(StatusRequest) returns (stream DaemonStatus);
+}
+
+message StatusRequest {}
