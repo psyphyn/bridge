@@ -1,0 +1,5 @@
+module BridgeCore {
+    header "bridge_ffi.h"
+    link "bridge_ffi"
+    export *
+}

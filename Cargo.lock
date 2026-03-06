@@ -305,9 +305,14 @@ dependencies = [
 name = "bridge-ffi"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bridge-core",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

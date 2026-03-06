@@ -4,13 +4,413 @@
 //! - Swift/Objective-C (Apple platforms)
 //! - JNI (Android/Kotlin)
 //! - C#/P/Invoke (Windows)
+//!
+//! All functions use C-compatible types and conventions:
+//! - Strings are passed as `*const c_char` (null-terminated UTF-8)
+//! - Callbacks use `extern "C"` function pointers
+//! - Memory ownership is explicit: caller frees what caller allocates
+
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::sync::OnceLock;
+
+use bridge_core::tunnel::{TunnelConfig, TunnelManager, TunnelState};
+use tokio::runtime::Runtime;
+use uuid::Uuid;
+
+// ── Global runtime and tunnel manager ────────────────────────────────
+
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+static TUNNEL_MANAGER: OnceLock<TunnelManager> = OnceLock::new();
+
+fn runtime() -> &'static Runtime {
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime")
+    })
+}
+
+fn tunnel_manager() -> &'static TunnelManager {
+    TUNNEL_MANAGER.get_or_init(TunnelManager::new)
+}
+
+// ── Version ──────────────────────────────────────────────────────────
 
 /// Returns the Bridge core version as a C string.
 ///
 /// # Safety
 /// The returned pointer is valid for the lifetime of the program.
+/// Do NOT free this pointer.
 #[no_mangle]
-pub extern "C" fn bridge_version() -> *const std::ffi::c_char {
-    // Static string, valid for program lifetime
-    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const std::ffi::c_char
+pub extern "C" fn bridge_version() -> *const c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr() as *const c_char
+}
+
+// ── Keypair generation ───────────────────────────────────────────────
+
+/// Result of keypair generation. Caller must free both strings with `bridge_free_string`.
+#[repr(C)]
+pub struct BridgeKeypair {
+    pub private_key: *mut c_char,
+    pub public_key: *mut c_char,
+}
+
+/// Generate a new WireGuard keypair. Returns base64-encoded keys.
+///
+/// # Safety
+/// Caller must free both `private_key` and `public_key` with `bridge_free_string`.
+#[no_mangle]
+pub extern "C" fn bridge_generate_keypair() -> BridgeKeypair {
+    let (private_key, public_key) = bridge_core::tunnel::generate_keypair();
+    BridgeKeypair {
+        private_key: CString::new(private_key).unwrap().into_raw(),
+        public_key: CString::new(public_key).unwrap().into_raw(),
+    }
+}
+
+// ── Tunnel configuration ─────────────────────────────────────────────
+
+/// C-compatible tunnel configuration.
+#[repr(C)]
+pub struct BridgeTunnelConfig {
+    /// UUID string (e.g., "550e8400-e29b-41d4-a716-446655440000")
+    pub tunnel_id: *const c_char,
+    /// Base64-encoded WireGuard private key
+    pub private_key: *const c_char,
+    /// Base64-encoded peer public key
+    pub peer_public_key: *const c_char,
+    /// Peer endpoint as "host:port"
+    pub peer_endpoint: *const c_char,
+    /// Comma-separated CIDR ranges (e.g., "0.0.0.0/0,10.0.0.0/8")
+    pub allowed_ips: *const c_char,
+    /// Comma-separated DNS servers (e.g., "1.1.1.1,8.8.8.8")
+    pub dns: *const c_char,
+    /// Keepalive interval in seconds. 0 means disabled.
+    pub keepalive_secs: u16,
+}
+
+/// Result code for FFI operations.
+#[repr(C)]
+pub enum BridgeResult {
+    Ok = 0,
+    InvalidArgument = 1,
+    TunnelNotFound = 2,
+    TunnelNotConnected = 3,
+    ConnectionFailed = 4,
+    InternalError = 5,
+}
+
+/// Tunnel state visible to FFI callers.
+#[repr(C)]
+pub enum BridgeTunnelState {
+    Disconnected = 0,
+    Connecting = 1,
+    Connected = 2,
+    Reconnecting = 3,
+    Disconnecting = 4,
+    Unknown = 5,
+}
+
+impl From<TunnelState> for BridgeTunnelState {
+    fn from(state: TunnelState) -> Self {
+        match state {
+            TunnelState::Disconnected => BridgeTunnelState::Disconnected,
+            TunnelState::Connecting => BridgeTunnelState::Connecting,
+            TunnelState::Connected => BridgeTunnelState::Connected,
+            TunnelState::Reconnecting => BridgeTunnelState::Reconnecting,
+            TunnelState::Disconnecting => BridgeTunnelState::Disconnecting,
+        }
+    }
+}
+
+/// Tunnel statistics.
+#[repr(C)]
+pub struct BridgeTunnelStats {
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub last_handshake_secs_ago: u64,
+}
+
+// ── Tunnel lifecycle ─────────────────────────────────────────────────
+
+unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    CStr::from_ptr(ptr).to_str().ok().map(|s| s.to_string())
+}
+
+fn parse_comma_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Add a tunnel configuration. Does not connect.
+///
+/// # Safety
+/// All string pointers in `config` must be valid null-terminated UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_add_tunnel(config: *const BridgeTunnelConfig) -> BridgeResult {
+    let config = match config.as_ref() {
+        Some(c) => c,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    let tunnel_id = match cstr_to_string(config.tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    let private_key = match cstr_to_string(config.private_key) {
+        Some(k) => k,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    let peer_public_key = match cstr_to_string(config.peer_public_key) {
+        Some(k) => k,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    let peer_endpoint = match cstr_to_string(config.peer_endpoint)
+        .and_then(|s| s.parse().ok())
+    {
+        Some(ep) => ep,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    let allowed_ips = cstr_to_string(config.allowed_ips)
+        .map(|s| parse_comma_list(&s))
+        .unwrap_or_default();
+
+    let dns = cstr_to_string(config.dns)
+        .map(|s| parse_comma_list(&s))
+        .unwrap_or_default();
+
+    let keepalive = if config.keepalive_secs > 0 {
+        Some(config.keepalive_secs)
+    } else {
+        None
+    };
+
+    let tc = TunnelConfig {
+        id: tunnel_id,
+        private_key,
+        peer_public_key,
+        peer_endpoint,
+        allowed_ips,
+        dns,
+        keepalive_secs: keepalive,
+    };
+
+    runtime().block_on(tunnel_manager().add_tunnel(tc));
+    BridgeResult::Ok
+}
+
+/// Connect a registered tunnel.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_connect_tunnel(tunnel_id: *const c_char) -> BridgeResult {
+    let id = match cstr_to_string(tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    match runtime().block_on(tunnel_manager().connect(id)) {
+        Ok(()) => BridgeResult::Ok,
+        Err(bridge_core::tunnel::TunnelError::NotFound(_)) => BridgeResult::TunnelNotFound,
+        Err(_) => BridgeResult::ConnectionFailed,
+    }
+}
+
+/// Disconnect a tunnel.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_disconnect_tunnel(tunnel_id: *const c_char) -> BridgeResult {
+    let id = match cstr_to_string(tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    match runtime().block_on(tunnel_manager().disconnect(id)) {
+        Ok(()) => BridgeResult::Ok,
+        Err(bridge_core::tunnel::TunnelError::NotFound(_)) => BridgeResult::TunnelNotFound,
+        Err(_) => BridgeResult::InternalError,
+    }
+}
+
+/// Remove a tunnel entirely.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_remove_tunnel(tunnel_id: *const c_char) -> BridgeResult {
+    let id = match cstr_to_string(tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    match runtime().block_on(tunnel_manager().remove_tunnel(id)) {
+        Ok(()) => BridgeResult::Ok,
+        Err(_) => BridgeResult::InternalError,
+    }
+}
+
+/// Get the state of a tunnel.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_tunnel_state(tunnel_id: *const c_char) -> BridgeTunnelState {
+    let id = match cstr_to_string(tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return BridgeTunnelState::Unknown,
+    };
+
+    match runtime().block_on(tunnel_manager().tunnel_state(id)) {
+        Some(state) => state.into(),
+        None => BridgeTunnelState::Unknown,
+    }
+}
+
+/// Get tunnel statistics. Returns false if tunnel not found.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_tunnel_stats(
+    tunnel_id: *const c_char,
+    out_stats: *mut BridgeTunnelStats,
+) -> bool {
+    let id = match cstr_to_string(tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return false,
+    };
+
+    let out = match out_stats.as_mut() {
+        Some(o) => o,
+        None => return false,
+    };
+
+    match runtime().block_on(tunnel_manager().tunnel_stats(id)) {
+        Some(stats) => {
+            out.bytes_sent = stats.tx_bytes;
+            out.bytes_received = stats.rx_bytes;
+            out.packets_sent = stats.tx_packets;
+            out.packets_received = stats.rx_packets;
+            out.last_handshake_secs_ago = stats.last_handshake_secs.unwrap_or(0);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Get the number of registered tunnels.
+#[no_mangle]
+pub extern "C" fn bridge_tunnel_count() -> u32 {
+    runtime().block_on(tunnel_manager().tunnel_count()) as u32
+}
+
+// ── Packet I/O (for Network Extension) ───────────────────────────────
+
+/// Send an IP packet into a specific tunnel.
+///
+/// # Safety
+/// `packet_data` must point to `packet_len` valid bytes.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_send_packet(
+    tunnel_id: *const c_char,
+    packet_data: *const u8,
+    packet_len: usize,
+) -> BridgeResult {
+    let id = match cstr_to_string(tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    if packet_data.is_null() || packet_len == 0 {
+        return BridgeResult::InvalidArgument;
+    }
+
+    let packet = std::slice::from_raw_parts(packet_data, packet_len);
+
+    match runtime().block_on(tunnel_manager().send_packet(id, packet)) {
+        Ok(()) => BridgeResult::Ok,
+        Err(bridge_core::tunnel::TunnelError::NotFound(_)) => BridgeResult::TunnelNotFound,
+        Err(bridge_core::tunnel::TunnelError::NotConnected(_)) => BridgeResult::TunnelNotConnected,
+        Err(_) => BridgeResult::InternalError,
+    }
+}
+
+/// Callback type for receiving decrypted packets from a tunnel.
+pub type BridgePacketCallback =
+    unsafe extern "C" fn(context: *mut c_void, packet_data: *const u8, packet_len: usize);
+
+// ── Device identity ──────────────────────────────────────────────────
+
+/// Generate an Ed25519 identity keypair. Returns base64-encoded keys.
+///
+/// # Safety
+/// Caller must free both strings with `bridge_free_string`.
+#[repr(C)]
+pub struct BridgeIdentityKeypair {
+    pub private_key: *mut c_char,
+    pub public_key: *mut c_char,
+    pub device_id: *mut c_char,
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_generate_identity() -> BridgeIdentityKeypair {
+    use base64::Engine;
+
+    match bridge_core::identity::generate_identity_keypair() {
+        Ok((private_key, public_key)) => {
+            let device_id = bridge_core::identity::device_id_from_public_key(&public_key);
+            let priv_b64 = base64::engine::general_purpose::STANDARD.encode(&private_key);
+            let pub_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key);
+
+            BridgeIdentityKeypair {
+                private_key: CString::new(priv_b64).unwrap().into_raw(),
+                public_key: CString::new(pub_b64).unwrap().into_raw(),
+                device_id: CString::new(device_id.to_string()).unwrap().into_raw(),
+            }
+        }
+        Err(_) => BridgeIdentityKeypair {
+            private_key: std::ptr::null_mut(),
+            public_key: std::ptr::null_mut(),
+            device_id: std::ptr::null_mut(),
+        },
+    }
+}
+
+// ── Memory management ────────────────────────────────────────────────
+
+/// Free a string previously returned by a `bridge_*` function.
+///
+/// # Safety
+/// `ptr` must have been allocated by a `bridge_*` function, or be null.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_free_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        drop(CString::from_raw(ptr));
+    }
+}
+
+// ── Logging ──────────────────────────────────────────────────────────
+
+/// Log callback type.
+pub type BridgeLogCallback =
+    unsafe extern "C" fn(context: *mut c_void, level: u8, message: *const c_char);
+
+/// Initialize logging. Pass a callback to receive log messages.
+/// Levels: 0=error, 1=warn, 2=info, 3=debug, 4=trace
+///
+/// # Safety
+/// `callback` and `context` must remain valid for the lifetime of the program.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_init_logging(
+    _callback: BridgeLogCallback,
+    _context: *mut c_void,
+) {
+    // Initialize tracing subscriber that forwards to the callback.
+    // For now, just initialize basic tracing.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
 }
