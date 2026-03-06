@@ -8,9 +8,11 @@ use base64::Engine;
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
+mod inspector;
 mod peer_map;
 mod wg_server;
 
+use inspector::create_shared_inspector;
 use wg_server::WgServer;
 
 #[derive(Serialize)]
@@ -57,8 +59,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Create inspection pipeline
+    let shared_inspector = create_shared_inspector();
+
     // Start WireGuard server
-    let wg_server = WgServer::bind(&wg_listen, relay_private_key).await?;
+    let wg_server = WgServer::bind(&wg_listen, relay_private_key, shared_inspector).await?;
 
     // Start health check HTTP server
     let wg_server_ref = std::sync::Arc::new(wg_server);

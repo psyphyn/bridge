@@ -1,0 +1,23 @@
+FROM rust:1.75-bookworm AS builder
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY proto/ proto/
+
+RUN cargo build --release --bin bridge-relay
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/bridge-relay /usr/local/bin/bridge-relay
+
+ENV RUST_LOG=info
+ENV BRIDGE_WG_LISTEN=0.0.0.0:51820
+ENV BRIDGE_HEALTH_LISTEN=0.0.0.0:8081
+
+EXPOSE 51820/udp
+EXPOSE 8081
+
+CMD ["bridge-relay"]

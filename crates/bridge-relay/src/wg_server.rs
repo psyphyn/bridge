@@ -10,6 +10,9 @@ use boringtun::noise::TunnResult;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
+use bridge_core::inspect::Verdict;
+
+use crate::inspector::SharedInspector;
 use crate::peer_map::PeerMap;
 
 /// Max WireGuard packet size.
@@ -19,17 +22,23 @@ const MAX_PACKET: usize = 65536;
 pub struct WgServer {
     socket: Arc<UdpSocket>,
     peers: Arc<Mutex<PeerMap>>,
+    inspector: SharedInspector,
 }
 
 impl WgServer {
     /// Bind the WireGuard server to the given address.
-    pub async fn bind(addr: &str, relay_private_key: [u8; 32]) -> anyhow::Result<Self> {
+    pub async fn bind(
+        addr: &str,
+        relay_private_key: [u8; 32],
+        inspector: SharedInspector,
+    ) -> anyhow::Result<Self> {
         let socket = UdpSocket::bind(addr).await?;
         tracing::info!(addr = %socket.local_addr()?, "WireGuard server listening");
 
         Ok(Self {
             socket: Arc::new(socket),
             peers: Arc::new(Mutex::new(PeerMap::new(relay_private_key))),
+            inspector,
         })
     }
 
@@ -99,14 +108,54 @@ impl WgServer {
                 let len = data.len();
                 peer_lock.rx_bytes += len as u64;
 
-                // TODO: Run through inspection pipeline
-                // TODO: Forward to destination or route to another tunnel
+                // Run through inspection pipeline
+                let verdict = {
+                    let mut inspector = self.inspector.lock().await;
+                    inspector.inspect_packet(peer_addr, data)
+                };
 
-                tracing::debug!(
-                    %peer_addr,
-                    bytes = len,
-                    "Decapsulated packet from client"
-                );
+                match &verdict {
+                    Verdict::Block { reason } => {
+                        tracing::warn!(
+                            %peer_addr,
+                            bytes = len,
+                            %reason,
+                            "Packet blocked by inspection"
+                        );
+                        // Drop the packet — don't forward
+                    }
+                    Verdict::Alert { severity, message } => {
+                        tracing::info!(
+                            %peer_addr,
+                            bytes = len,
+                            ?severity,
+                            %message,
+                            "Inspection alert"
+                        );
+                        // TODO: Forward to destination (alert doesn't block)
+                        tracing::debug!(
+                            %peer_addr,
+                            bytes = len,
+                            "Forwarding packet (alert)"
+                        );
+                    }
+                    Verdict::ShadowCopy => {
+                        // TODO: Copy packet to shadow store for audit
+                        tracing::debug!(
+                            %peer_addr,
+                            bytes = len,
+                            "Shadow copy + forward"
+                        );
+                    }
+                    Verdict::Allow => {
+                        // TODO: Forward to destination or route to another tunnel
+                        tracing::debug!(
+                            %peer_addr,
+                            bytes = len,
+                            "Decapsulated packet from client"
+                        );
+                    }
+                }
             }
             TunnResult::Done => {}
             TunnResult::Err(e) => {
