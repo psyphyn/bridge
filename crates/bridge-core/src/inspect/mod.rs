@@ -1,7 +1,21 @@
 //! Traffic inspection engine (mitmproxy-inspired).
 //!
-//! Provides flow-based inspection with hooks and addons for TLS interception,
-//! DLP scanning, and threat detection.
+//! Provides flow-based inspection with a pipeline of inspectors.
+//! Each flow represents a connection or request/response pair.
+//!
+//! Architecture (inspired by mitmproxy):
+//! - Flows track connection lifecycle
+//! - Inspectors are chained in a pipeline
+//! - Each inspector can allow, block, alert, or shadow-copy
+//! - First blocking verdict wins
+
+mod dlp;
+mod flow;
+mod pipeline;
+
+pub use dlp::{DlpScanner, DlpPattern, DlpMatch};
+pub use flow::{Flow, FlowMetadata, FlowDirection, FlowState};
+pub use pipeline::{InspectionPipeline, Inspector, InspectorResult};
 
 use serde::{Deserialize, Serialize};
 
