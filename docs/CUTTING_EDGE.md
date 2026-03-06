@@ -206,6 +206,65 @@ fn inspect_flow(flow: &Flow) -> Decision {
 
 ---
 
+### 9. Traffic Camouflage & Collateral Freedom
+
+**What:** Make Bridge tunnel traffic indistinguishable from legitimate, widely-used internet services. Inspired by Tor's "collateral damage" strategy — censors must either allow Bridge traffic or block an essential service entirely.
+
+**Why it matters:**
+- Enterprises operating in restrictive regions (China, Russia, Iran) need VPN tunnels that survive deep packet inspection (DPI)
+- WireGuard's UDP protocol has a distinctive fingerprint that DPI can easily detect and block
+- Tor solved this with pluggable transports; Bridge needs equivalent capabilities for enterprise use
+- No enterprise VPN competitor offers this — it's a unique capability for multinational organizations
+
+**How Bridge uses it:**
+
+1. **CDN Domain Fronting**
+   - Bridge relay traffic wrapped in HTTPS to a major CDN (Cloudflare, Fastly, AWS CloudFront)
+   - Outer TLS SNI shows `cdn.example.com`; inner HTTP Host header routes to Bridge relay
+   - Censor sees normal HTTPS to Cloudflare — blocking it means blocking all Cloudflare-hosted sites
+   - "Collateral damage" makes blocking prohibitively expensive
+
+2. **Pluggable Transport Layer**
+   - Modular transport system (like Tor's PT spec) with multiple options:
+     - **HTTPS mimicry (meek-style):** WireGuard payload inside normal-looking HTTPS requests
+     - **WebSocket tunneling:** WireGuard over `wss://`, indistinguishable from a web application
+     - **QUIC wrapping:** Tunnel over QUIC/HTTP3, looks like standard browser traffic
+     - **TLS camouflage:** Mimics TLS fingerprint of popular browsers (Chrome, Safari)
+   - Client auto-selects the best transport based on network environment detection
+
+3. **DNS-over-HTTPS Fallback Channel**
+   - Bootstrapping and control channel over DoH to `1.1.1.1` or `8.8.8.8`
+   - Blocking this = breaking DNS resolution for everyone on the network
+   - Used for initial relay discovery and emergency policy sync when all other channels are blocked
+
+4. **Traffic Shaping & Timing Obfuscation**
+   - Pad packets to common sizes (MTU-aligned)
+   - Add random timing jitter to defeat traffic analysis
+   - Insert dummy traffic to maintain constant-rate patterns
+   - Prevents statistical analysis from identifying Bridge tunnels
+
+**Architecture:**
+```
+┌──────────────────┐     ┌─────────────────┐     ┌──────────────┐
+│  Bridge Client   │     │  CDN Edge       │     │ Bridge Relay │
+│                  │────►│  (Cloudflare)   │────►│              │
+│  WG payload in   │HTTPS│  Looks like     │     │  Unwraps &   │
+│  HTTPS wrapper   │     │  normal traffic │     │  processes   │
+└──────────────────┘     └─────────────────┘     └──────────────┘
+
+  DPI sees: HTTPS to cloudflare.com (can't block without breaking the internet)
+```
+
+**Rust ecosystem:** `tokio-tungstenite` (WebSocket), `quinn` (QUIC), `hyper` (HTTPS wrapping)
+
+**Enterprise use cases:**
+- Multinational companies with offices in censored regions
+- Journalists and NGOs operating in hostile network environments
+- Business continuity when state-level firewalls block standard VPN protocols
+- Compliance with local regulations while maintaining secure corporate access
+
+---
+
 ## Competitive Moat Summary
 
 | Technology | Bridge | Tailscale | Cloudflare WARP | Zscaler | CrowdStrike |
@@ -218,5 +277,6 @@ fn inspect_flow(flow: &Flow) -> Decision {
 | WASM policy extensions | Yes | No | Workers (different) | No | No |
 | Behavioral biometrics | Yes | No | No | Partial | Yes |
 | ECH awareness | Yes | N/A | They control ECH | Partial | N/A |
+| Traffic camouflage / collateral freedom | Yes | No | No (they ARE the CDN) | No | No |
 
-The combination of post-quantum crypto + confidential computing + FIDO2 attestation creates a security story that no competitor can match: "Quantum-resistant tunnels, hardware-proven devices, and inspection that even we can't spy on."
+The combination of post-quantum crypto + confidential computing + FIDO2 attestation + traffic camouflage creates a security story that no competitor can match: "Quantum-resistant tunnels, hardware-proven devices, inspection that even we can't spy on, and traffic that censors can't block without breaking the internet."
