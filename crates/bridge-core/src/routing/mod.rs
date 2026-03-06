@@ -252,6 +252,11 @@ impl AppRouter {
     pub fn groups(&self) -> &[TunnelGroup] {
         &self.config.groups
     }
+
+    /// Get the current router configuration.
+    pub fn config(&self) -> &RouterConfig {
+        &self.config
+    }
 }
 
 /// Domain matching with wildcard support.

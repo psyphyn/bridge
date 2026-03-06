@@ -116,6 +116,60 @@ char* bridge_create_attestation_token(
 // Check if the current keystore is hardware-backed.
 bool bridge_keystore_is_hardware_backed(void);
 
+// ── Per-app routing ──────────────────────────────────────────────────
+
+typedef enum {
+    BridgeRoutingDecisionTunnel = 0,
+    BridgeRoutingDecisionDirect = 1,
+    BridgeRoutingDecisionDrop = 2,
+} BridgeRoutingDecision;
+
+typedef struct {
+    BridgeRoutingDecision decision;
+    char* tunnel_id;   // Valid when decision == Tunnel. Free with bridge_free_string.
+} BridgeRouteResult;
+
+// Initialize the per-app router.
+// mode: 0 = TunnelAll, 1 = SplitTunnel
+BridgeResult bridge_router_init(const char* default_tunnel_id, uint8_t mode);
+
+// Add a tunnel group. applications/domains/ip_ranges are comma-separated.
+BridgeResult bridge_router_add_group(
+    const char* name,
+    const char* tunnel_id,
+    const char* applications,
+    const char* domains,
+    const char* ip_ranges,
+    uint32_t priority
+);
+
+// Set bypass apps (comma-separated bundle IDs).
+BridgeResult bridge_router_set_bypass_apps(const char* apps);
+
+// Set bypass domains (comma-separated, supports wildcards like "*.apple.com").
+BridgeResult bridge_router_set_bypass_domains(const char* domains);
+
+// Record a DNS resolution for domain-based routing.
+BridgeResult bridge_router_record_dns(const char* domain, const char* ip);
+
+// Route by app + destination. Free tunnel_id with bridge_free_string.
+BridgeRouteResult bridge_router_route(
+    const char* bundle_id,
+    const char* dest_ip,
+    uint16_t dest_port,
+    const char* protocol
+);
+
+// Route a raw IP packet. Free tunnel_id with bridge_free_string.
+BridgeRouteResult bridge_router_route_packet(
+    const char* bundle_id,
+    const uint8_t* packet_data,
+    size_t packet_len
+);
+
+// Get the number of tunnel groups.
+uint32_t bridge_router_group_count(void);
+
 // ── Logging ──────────────────────────────────────────────────────────
 
 typedef void (*BridgeLogCallback)(void* context, uint8_t level, const char* message);

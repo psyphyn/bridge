@@ -5,6 +5,7 @@ use bridge_core::api_types::{
     DeviceRegistrationRequest, DeviceRegistrationResponse, PostureReportRequest,
     PostureReportResponse,
 };
+use bridge_core::policy::{Action, Condition, PolicyRule};
 use serde::{Deserialize, Serialize};
 
 // We need to reconstruct the app for testing since the server modules are private.
@@ -233,6 +234,161 @@ async fn posture_report_calculates_score() {
 
     assert_eq!(posture.posture_score, 60);
     assert_eq!(posture.access_tier, "restricted");
+}
+
+// ─── Policy test server ──────────────────────────────────────────────
+
+async fn spawn_policy_test_server() -> String {
+    use bridge_core::policy::PolicySet;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    let policies: Arc<RwLock<HashMap<String, PolicySet>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    #[derive(Clone)]
+    struct PolicyState {
+        policies: Arc<RwLock<HashMap<String, PolicySet>>>,
+    }
+
+    async fn list_policies(
+        axum::extract::State(state): axum::extract::State<PolicyState>,
+    ) -> Json<Vec<PolicySet>> {
+        let policies = state.policies.read().await;
+        Json(policies.values().cloned().collect())
+    }
+
+    async fn upsert_policy(
+        axum::extract::State(state): axum::extract::State<PolicyState>,
+        Json(ps): Json<PolicySet>,
+    ) -> (axum::http::StatusCode, Json<PolicySet>) {
+        let mut policies = state.policies.write().await;
+        let is_new = !policies.contains_key(&ps.name);
+        policies.insert(ps.name.clone(), ps.clone());
+        let status = if is_new {
+            axum::http::StatusCode::CREATED
+        } else {
+            axum::http::StatusCode::OK
+        };
+        (status, Json(ps))
+    }
+
+    async fn delete_policy(
+        axum::extract::State(state): axum::extract::State<PolicyState>,
+        axum::extract::Path(name): axum::extract::Path<String>,
+    ) -> axum::http::StatusCode {
+        let mut policies = state.policies.write().await;
+        if policies.remove(&name).is_some() {
+            axum::http::StatusCode::NO_CONTENT
+        } else {
+            axum::http::StatusCode::NOT_FOUND
+        }
+    }
+
+    let state = PolicyState { policies };
+
+    tokio::spawn(async move {
+        let app = Router::new()
+            .route("/api/v1/policies", get(list_policies).post(upsert_policy))
+            .route("/api/v1/policies/:name", axum::routing::delete(delete_policy))
+            .with_state(state);
+
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    base_url
+}
+
+#[tokio::test]
+async fn policy_crud() {
+    use bridge_core::policy::PolicySet;
+
+    let base = spawn_policy_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Initially no policies
+    let list: Vec<PolicySet> = client
+        .get(format!("{}/api/v1/policies", base))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(list.len(), 0);
+
+    // Create a policy
+    let policy = PolicySet {
+        name: "test-block-malware".to_string(),
+        default_action: Action::Allow,
+        rules: vec![PolicyRule {
+            name: "block-malware".to_string(),
+            conditions: vec![Condition::DomainMatches(vec![
+                "malware.com".to_string(),
+                "*.evil.net".to_string(),
+            ])],
+            action: Action::Block {
+                reason: "Malware domain".to_string(),
+            },
+        }],
+    };
+
+    let resp = client
+        .post(format!("{}/api/v1/policies", base))
+        .json(&policy)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 201);
+
+    // List should now have 1
+    let list: Vec<PolicySet> = client
+        .get(format!("{}/api/v1/policies", base))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name, "test-block-malware");
+    assert_eq!(list[0].rules.len(), 1);
+
+    // Update (upsert) the same policy with an extra rule
+    let updated = PolicySet {
+        name: "test-block-malware".to_string(),
+        default_action: Action::Allow,
+        rules: vec![
+            PolicyRule {
+                name: "block-malware".to_string(),
+                conditions: vec![Condition::DomainMatches(vec!["malware.com".to_string()])],
+                action: Action::Block { reason: "Malware".to_string() },
+            },
+            PolicyRule {
+                name: "block-phishing".to_string(),
+                conditions: vec![Condition::DomainMatches(vec!["*.phishing.net".to_string()])],
+                action: Action::Block { reason: "Phishing".to_string() },
+            },
+        ],
+    };
+
+    let resp = client
+        .post(format!("{}/api/v1/policies", base))
+        .json(&updated)
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200); // Updated, not created
+
+    // Delete
+    let resp = client
+        .delete(format!("{}/api/v1/policies/test-block-malware", base))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // Delete non-existent
+    let resp = client
+        .delete(format!("{}/api/v1/policies/nonexistent", base))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // List empty again
+    let list: Vec<PolicySet> = client
+        .get(format!("{}/api/v1/policies", base))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(list.len(), 0);
 }
 
 #[tokio::test]

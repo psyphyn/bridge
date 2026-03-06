@@ -17,6 +17,7 @@ use bridge_core::identity::{
     self, DeviceAttestation,
 };
 use bridge_core::posture::{self, AccessTier};
+use bridge_core::routing::{AppRouter, RouterConfig, TunnelGroup, DefaultRoute};
 use bridge_core::tunnel::{TunnelConfig, TunnelManager};
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
@@ -119,6 +120,56 @@ async fn main() -> anyhow::Result<()> {
         tunnel_mgr.add_tunnel(config).await;
         tunnel_mgr.connect(assignment.tunnel_id).await?;
     }
+
+    // ── Step 5b: Initialize per-app router ──
+    let default_tunnel_id = registration.tunnels.first().map(|t| t.tunnel_id);
+
+    let router_config = RouterConfig {
+        groups: vec![
+            TunnelGroup {
+                name: "browsers".to_string(),
+                tunnel_id: default_tunnel_id.unwrap_or_default(),
+                applications: vec![
+                    "com.apple.Safari".to_string(),
+                    "com.google.Chrome".to_string(),
+                    "org.mozilla.firefox".to_string(),
+                    "com.microsoft.edgemac".to_string(),
+                ],
+                domains: vec![],
+                ip_ranges: vec![],
+                priority: 1,
+            },
+            TunnelGroup {
+                name: "dev-tools".to_string(),
+                tunnel_id: default_tunnel_id.unwrap_or_default(),
+                applications: vec![
+                    "com.apple.Terminal".to_string(),
+                    "com.microsoft.VSCode".to_string(),
+                    "com.todesktop.230313mzl4w4u92".to_string(), // Cursor
+                ],
+                domains: vec!["*.github.com".to_string(), "*.gitlab.com".to_string()],
+                ip_ranges: vec![],
+                priority: 2,
+            },
+        ],
+        default_tunnel: default_tunnel_id,
+        bypass_apps: vec![
+            "com.apple.Music".to_string(),
+            "com.apple.TV".to_string(),
+        ],
+        bypass_domains: vec![
+            "*.apple.com".to_string(),
+            "*.icloud.com".to_string(),
+        ],
+        default_route: DefaultRoute::TunnelAll,
+    };
+
+    let router = Arc::new(tokio::sync::RwLock::new(AppRouter::new(router_config)));
+    tracing::info!(
+        groups = router.read().await.groups().len(),
+        default_tunnel = ?default_tunnel_id,
+        "Per-app router initialized"
+    );
 
     let start_time = Instant::now();
 

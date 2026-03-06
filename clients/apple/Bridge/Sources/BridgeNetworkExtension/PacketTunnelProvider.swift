@@ -85,6 +85,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         activeTunnelId = tunnelIdStr
 
+        // Initialize per-app router
+        initializeRouter(defaultTunnelId: tunnelIdStr, config: config)
+
         // Configure the virtual network interface
         let networkSettings = buildNetworkSettings(
             tunnelAddress: "10.0.0.2",
@@ -147,26 +150,111 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    // MARK: - Per-App Router
+
+    /// Initialize the per-app router from provider config.
+    private func initializeRouter(defaultTunnelId: String, config: [String: Any]) {
+        // Init router: mode 0 = TunnelAll
+        let mode: UInt8 = (config["splitTunnel"] as? Bool == true) ? 1 : 0
+        defaultTunnelId.withCString { ptr in
+            _ = bridge_router_init(ptr, mode)
+        }
+
+        // Add router groups from config if present
+        if let groups = config["routerGroups"] as? [[String: Any]] {
+            for group in groups {
+                guard let name = group["name"] as? String,
+                      let tid = group["tunnelId"] as? String else { continue }
+                let apps = (group["applications"] as? String) ?? ""
+                let domains = (group["domains"] as? String) ?? ""
+                let ipRanges = (group["ipRanges"] as? String) ?? ""
+                let priority = UInt32(group["priority"] as? Int ?? 10)
+
+                name.withCString { nPtr in
+                    tid.withCString { tPtr in
+                        apps.withCString { aPtr in
+                            domains.withCString { dPtr in
+                                ipRanges.withCString { iPtr in
+                                    _ = bridge_router_add_group(nPtr, tPtr, aPtr, dPtr, iPtr, priority)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Set bypass apps
+        if let bypass = config["bypassApps"] as? String {
+            bypass.withCString { ptr in
+                _ = bridge_router_set_bypass_apps(ptr)
+            }
+        }
+
+        // Set bypass domains
+        if let bypass = config["bypassDomains"] as? String {
+            bypass.withCString { ptr in
+                _ = bridge_router_set_bypass_domains(ptr)
+            }
+        }
+
+        os_log(.info, log: log, "Router initialized with %d groups", bridge_router_group_count())
+    }
+
     // MARK: - Packet Forwarding
 
-    /// Read IP packets from the virtual TUN interface and forward them through WireGuard.
+    /// Read IP packets from the virtual TUN interface and route them through the appropriate tunnel.
     private func startPacketForwarding() {
-        guard let tunnelId = activeTunnelId else { return }
+        guard let defaultTunnelId = activeTunnelId else { return }
 
         packetFlow.readPackets { [weak self] packets, protocols in
-            for (i, packet) in packets.enumerated() {
-                self?.forwardPacket(packet, tunnelId: tunnelId)
+            for packet in packets {
+                self?.routeAndForwardPacket(packet, defaultTunnelId: defaultTunnelId)
             }
             // Continue reading
             self?.startPacketForwarding()
         }
     }
 
-    private func forwardPacket(_ packet: Data, tunnelId: String) {
+    /// Route a packet through the per-app router, then forward to the chosen tunnel.
+    private func routeAndForwardPacket(_ packet: Data, defaultTunnelId: String) {
         packet.withUnsafeBytes { rawBuf in
             guard let ptr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            tunnelId.withCString { tidPtr in
-                _ = bridge_send_packet(tidPtr, ptr, rawBuf.count)
+
+            // Ask the router which tunnel this packet should go to
+            let routeResult = bridge_router_route_packet(nil, ptr, rawBuf.count)
+
+            switch routeResult.decision {
+            case BridgeRoutingDecisionTunnel:
+                // Route through the specified tunnel
+                if let tidPtr = routeResult.tunnel_id {
+                    let tunnelId = String(cString: tidPtr)
+                    tunnelId.withCString { tidCStr in
+                        _ = bridge_send_packet(tidCStr, ptr, rawBuf.count)
+                    }
+                    bridge_free_string(tidPtr)
+                } else {
+                    // Fallback to default tunnel
+                    defaultTunnelId.withCString { tidPtr in
+                        _ = bridge_send_packet(tidPtr, ptr, rawBuf.count)
+                    }
+                }
+
+            case BridgeRoutingDecisionDirect:
+                // Bypass: write packet back to the system network stack
+                // In a Network Extension, bypassed traffic is handled by not
+                // capturing it (via excludedRoutes), but if we get it here,
+                // we just pass it through the default tunnel.
+                defaultTunnelId.withCString { tidPtr in
+                    _ = bridge_send_packet(tidPtr, ptr, rawBuf.count)
+                }
+
+            case BridgeRoutingDecisionDrop:
+                // Silently drop the packet (blocked by policy)
+                break
+
+            default:
+                break
             }
         }
     }

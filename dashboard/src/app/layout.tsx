@@ -33,6 +33,7 @@ function Sidebar() {
       <ul className="space-y-1">
         <NavItem href="/" label="Overview" />
         <NavItem href="/devices" label="Devices" />
+        <NavItem href="/policies" label="Policies" />
       </ul>
     </nav>
   );

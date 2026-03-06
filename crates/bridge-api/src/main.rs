@@ -61,6 +61,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/devices", get(routes::devices::list_devices))
         .route("/api/v1/attest/challenge", get(routes::attest::issue_challenge))
         .route("/api/v1/attest/verify", post(routes::attest::verify_attestation))
+        // Policy management
+        .route("/api/v1/policies", get(routes::policy::list_policies).post(routes::policy::upsert_policy))
+        .route("/api/v1/policies/:name", get(routes::policy::get_policy).delete(routes::policy::delete_policy))
+        .route("/api/v1/policies/rules", post(routes::policy::add_rule))
+        .route("/api/v1/policies/evaluate", post(routes::policy::evaluate_policy))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 

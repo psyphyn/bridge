@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use bridge_core::policy::PolicySet;
 use crate::models::Device;
 use crate::routes::attest::AttestedDevice;
 
@@ -32,6 +33,8 @@ pub struct AppState {
     pub pending_challenges: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
     /// Devices that have completed App Attest (key_id -> attestation record).
     pub attested_devices: Arc<RwLock<HashMap<String, AttestedDevice>>>,
+    /// Named policy sets (name -> policy).
+    pub policies: Arc<RwLock<HashMap<String, PolicySet>>>,
 }
 
 impl AppState {
@@ -41,6 +44,7 @@ impl AppState {
             relay,
             pending_challenges: Arc::new(RwLock::new(HashMap::new())),
             attested_devices: Arc::new(RwLock::new(HashMap::new())),
+            policies: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }

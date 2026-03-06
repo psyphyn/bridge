@@ -11,16 +11,20 @@
 //! - Memory ownership is explicit: caller frees what caller allocates
 
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::net::IpAddr;
 use std::sync::OnceLock;
 
+use bridge_core::routing::{AppIdentity, AppRouter, DefaultRoute, RouterConfig, RoutingDecision, TunnelGroup};
 use bridge_core::tunnel::{TunnelConfig, TunnelManager, TunnelState};
 use tokio::runtime::Runtime;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 // ── Global runtime and tunnel manager ────────────────────────────────
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static TUNNEL_MANAGER: OnceLock<TunnelManager> = OnceLock::new();
+static ROUTER: OnceLock<RwLock<AppRouter>> = OnceLock::new();
 
 fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
@@ -499,6 +503,327 @@ fn null_attestation_info() -> BridgeAttestationInfo {
         device_id: std::ptr::null_mut(),
         public_key: std::ptr::null_mut(),
     }
+}
+
+// ── Per-app routing ──────────────────────────────────────────────────
+
+/// Routing decision returned to FFI callers.
+#[repr(C)]
+pub enum BridgeRoutingDecision {
+    /// Route through the tunnel whose UUID is in `tunnel_id`.
+    Tunnel = 0,
+    /// Bypass VPN, route directly.
+    Direct = 1,
+    /// Drop the packet.
+    Drop = 2,
+}
+
+/// Full routing result with tunnel ID (if Tunnel decision).
+#[repr(C)]
+pub struct BridgeRouteResult {
+    pub decision: BridgeRoutingDecision,
+    /// Tunnel UUID string (only valid when decision == Tunnel). Free with `bridge_free_string`.
+    pub tunnel_id: *mut c_char,
+}
+
+/// Initialize the per-app router with a default config.
+/// `default_tunnel_id`: UUID string for the default tunnel (nullable).
+/// `mode`: 0 = TunnelAll, 1 = SplitTunnel.
+///
+/// # Safety
+/// `default_tunnel_id` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_router_init(
+    default_tunnel_id: *const c_char,
+    mode: u8,
+) -> BridgeResult {
+    let default_tunnel = cstr_to_string(default_tunnel_id)
+        .and_then(|s| s.parse::<Uuid>().ok());
+
+    let default_route = if mode == 1 {
+        DefaultRoute::SplitTunnel
+    } else {
+        DefaultRoute::TunnelAll
+    };
+
+    let config = RouterConfig {
+        groups: vec![],
+        default_tunnel,
+        bypass_apps: vec![],
+        bypass_domains: vec![],
+        default_route,
+    };
+
+    let router = AppRouter::new(config);
+    // Replace or init the global router
+    match ROUTER.get() {
+        Some(lock) => {
+            *runtime().block_on(lock.write()) = router;
+        }
+        None => {
+            let _ = ROUTER.set(RwLock::new(router));
+        }
+    }
+    BridgeResult::Ok
+}
+
+/// Add a tunnel group to the router.
+///
+/// # Safety
+/// All string pointers must be valid null-terminated UTF-8 or null.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_router_add_group(
+    name: *const c_char,
+    tunnel_id: *const c_char,
+    applications: *const c_char,
+    domains: *const c_char,
+    ip_ranges: *const c_char,
+    priority: u32,
+) -> BridgeResult {
+    let name = match cstr_to_string(name) {
+        Some(n) => n,
+        None => return BridgeResult::InvalidArgument,
+    };
+    let tunnel_id = match cstr_to_string(tunnel_id).and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => id,
+        None => return BridgeResult::InvalidArgument,
+    };
+    let apps = cstr_to_string(applications)
+        .map(|s| parse_comma_list(&s))
+        .unwrap_or_default();
+    let doms = cstr_to_string(domains)
+        .map(|s| parse_comma_list(&s))
+        .unwrap_or_default();
+    let ips = cstr_to_string(ip_ranges)
+        .map(|s| parse_comma_list(&s))
+        .unwrap_or_default();
+
+    let group = TunnelGroup {
+        name,
+        tunnel_id,
+        applications: apps,
+        domains: doms,
+        ip_ranges: ips,
+        priority,
+    };
+
+    let lock = match ROUTER.get() {
+        Some(l) => l,
+        None => return BridgeResult::InternalError,
+    };
+
+    // Re-create router with the new group added to config
+    let mut router = runtime().block_on(lock.write());
+    let mut config = router_config_snapshot(&router);
+    config.groups.push(group);
+    *router = AppRouter::new(config);
+
+    BridgeResult::Ok
+}
+
+/// Set bypass apps (comma-separated bundle IDs).
+///
+/// # Safety
+/// `apps` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_router_set_bypass_apps(apps: *const c_char) -> BridgeResult {
+    let apps_list = cstr_to_string(apps)
+        .map(|s| parse_comma_list(&s))
+        .unwrap_or_default();
+
+    let lock = match ROUTER.get() {
+        Some(l) => l,
+        None => return BridgeResult::InternalError,
+    };
+
+    let mut router = runtime().block_on(lock.write());
+    let mut config = router_config_snapshot(&router);
+    config.bypass_apps = apps_list;
+    *router = AppRouter::new(config);
+
+    BridgeResult::Ok
+}
+
+/// Set bypass domains (comma-separated, supports wildcards like "*.apple.com").
+///
+/// # Safety
+/// `domains` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_router_set_bypass_domains(domains: *const c_char) -> BridgeResult {
+    let domains_list = cstr_to_string(domains)
+        .map(|s| parse_comma_list(&s))
+        .unwrap_or_default();
+
+    let lock = match ROUTER.get() {
+        Some(l) => l,
+        None => return BridgeResult::InternalError,
+    };
+
+    let mut router = runtime().block_on(lock.write());
+    let mut config = router_config_snapshot(&router);
+    config.bypass_domains = domains_list;
+    *router = AppRouter::new(config);
+
+    BridgeResult::Ok
+}
+
+/// Record a DNS resolution for domain-based routing.
+///
+/// # Safety
+/// `domain` and `ip` must be valid C strings.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_router_record_dns(
+    domain: *const c_char,
+    ip: *const c_char,
+) -> BridgeResult {
+    let domain = match cstr_to_string(domain) {
+        Some(d) => d,
+        None => return BridgeResult::InvalidArgument,
+    };
+    let ip: IpAddr = match cstr_to_string(ip).and_then(|s| s.parse().ok()) {
+        Some(ip) => ip,
+        None => return BridgeResult::InvalidArgument,
+    };
+
+    let lock = match ROUTER.get() {
+        Some(l) => l,
+        None => return BridgeResult::InternalError,
+    };
+
+    runtime().block_on(lock.write()).record_dns_resolution(&domain, ip);
+    BridgeResult::Ok
+}
+
+/// Route a packet based on the source app and destination.
+/// Returns a `BridgeRouteResult`. Caller must free `tunnel_id` with `bridge_free_string`.
+///
+/// # Safety
+/// `bundle_id` must be a valid C string or null.
+/// `dest_ip` must be a valid C string (e.g., "10.0.0.1").
+/// `protocol` must be a valid C string (e.g., "tcp", "udp").
+#[no_mangle]
+pub unsafe extern "C" fn bridge_router_route(
+    bundle_id: *const c_char,
+    dest_ip: *const c_char,
+    dest_port: u16,
+    protocol: *const c_char,
+) -> BridgeRouteResult {
+    let no_route = BridgeRouteResult {
+        decision: BridgeRoutingDecision::Direct,
+        tunnel_id: std::ptr::null_mut(),
+    };
+
+    let app_id = cstr_to_string(bundle_id).unwrap_or_default();
+    let dest: IpAddr = match cstr_to_string(dest_ip).and_then(|s| s.parse().ok()) {
+        Some(ip) => ip,
+        None => return no_route,
+    };
+    let proto = cstr_to_string(protocol).unwrap_or_else(|| "tcp".to_string());
+
+    let lock = match ROUTER.get() {
+        Some(l) => l,
+        None => return no_route,
+    };
+
+    let app = if app_id.is_empty() {
+        AppIdentity::from_process_name("unknown")
+    } else {
+        AppIdentity::from_bundle_id(&app_id)
+    };
+
+    let decision = runtime().block_on(lock.read()).route(&app, dest, dest_port, &proto);
+
+    match decision {
+        RoutingDecision::Tunnel(id) => BridgeRouteResult {
+            decision: BridgeRoutingDecision::Tunnel,
+            tunnel_id: CString::new(id.to_string()).unwrap().into_raw(),
+        },
+        RoutingDecision::Direct => BridgeRouteResult {
+            decision: BridgeRoutingDecision::Direct,
+            tunnel_id: std::ptr::null_mut(),
+        },
+        RoutingDecision::Drop { .. } => BridgeRouteResult {
+            decision: BridgeRoutingDecision::Drop,
+            tunnel_id: std::ptr::null_mut(),
+        },
+    }
+}
+
+/// Route a raw IP packet by parsing its headers.
+/// Returns a `BridgeRouteResult`. Caller must free `tunnel_id` with `bridge_free_string`.
+///
+/// # Safety
+/// `packet_data` must point to `packet_len` valid bytes.
+/// `bundle_id` must be a valid C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn bridge_router_route_packet(
+    bundle_id: *const c_char,
+    packet_data: *const u8,
+    packet_len: usize,
+) -> BridgeRouteResult {
+    let no_route = BridgeRouteResult {
+        decision: BridgeRoutingDecision::Direct,
+        tunnel_id: std::ptr::null_mut(),
+    };
+
+    if packet_data.is_null() || packet_len == 0 {
+        return no_route;
+    }
+
+    let packet = std::slice::from_raw_parts(packet_data, packet_len);
+
+    let (_src, dst, dst_port, proto_num) =
+        match bridge_core::routing::parse_packet_endpoints(packet) {
+            Some(ep) => ep,
+            None => return no_route,
+        };
+
+    let proto = match proto_num {
+        6 => "tcp",
+        17 => "udp",
+        1 => "icmp",
+        _ => "other",
+    };
+
+    let app_id = cstr_to_string(bundle_id).unwrap_or_default();
+    let app = if app_id.is_empty() {
+        AppIdentity::from_process_name("unknown")
+    } else {
+        AppIdentity::from_bundle_id(&app_id)
+    };
+
+    let lock = match ROUTER.get() {
+        Some(l) => l,
+        None => return no_route,
+    };
+
+    let decision = runtime().block_on(lock.read()).route(&app, dst, dst_port, proto);
+
+    match decision {
+        RoutingDecision::Tunnel(id) => BridgeRouteResult {
+            decision: BridgeRoutingDecision::Tunnel,
+            tunnel_id: CString::new(id.to_string()).unwrap().into_raw(),
+        },
+        RoutingDecision::Direct => no_route,
+        RoutingDecision::Drop { .. } => BridgeRouteResult {
+            decision: BridgeRoutingDecision::Drop,
+            tunnel_id: std::ptr::null_mut(),
+        },
+    }
+}
+
+/// Get the number of tunnel groups in the router.
+#[no_mangle]
+pub extern "C" fn bridge_router_group_count() -> u32 {
+    match ROUTER.get() {
+        Some(lock) => runtime().block_on(lock.read()).groups().len() as u32,
+        None => 0,
+    }
+}
+
+/// Helper: snapshot the current router config for mutation.
+fn router_config_snapshot(router: &AppRouter) -> RouterConfig {
+    router.config().clone()
 }
 
 // ── Memory management ────────────────────────────────────────────────
