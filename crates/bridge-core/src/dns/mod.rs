@@ -9,9 +9,14 @@
 
 mod parser;
 mod resolver;
+mod threat;
 
 pub use parser::{DnsPacket, DnsQuestion, DnsRecord, QueryType};
 pub use resolver::DnsResolver;
+pub use threat::{
+    ThreatIntel, ThreatCategory, ThreatAction, ThreatEntry,
+    builtin_malware_domains, builtin_phishing_domains, builtin_ad_domains,
+};
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
